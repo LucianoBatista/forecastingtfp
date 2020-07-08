@@ -1,0 +1,390 @@
+---
+title: "Case 1 - Business Problem"
+output: html_document
+---
+
+# Business Problem
+
+The objective here is to predict the RTFP$^{NA}$ score for the next 10 years, for Canada, Mexico, and the USA. This factor represents the growth of the country based on capital received. Every year Penn World Table does the calculation to make possible compare all countries across the years.
+
+# Libs
+
+These are the libraries for this case
+
+```{r}
+library(tidyverse)
+library(forecast)
+library(TSstudio)
+library(plotly)
+library(xts)
+library(skimr)
+library(tidyquant)
+library(ggtext)
+```
+
+# Data
+
+```{r}
+# raw data
+pwt_raw <- read_csv("data/TFP.csv")
+
+# first look
+glimpse(pwt_raw)
+skim(pwt_raw)
+```
+
+It's possible to see that the series be distributed annually, and every observation indicates a different year. The data doesn't have missing values, so will not be necessary any imputation method.
+
+```{r}
+pwt_raw %>% 
+  group_by(isocode) %>% 
+  count()
+```
+
+One problem identified is that the data have 186 observations, being 62 for each country. As was asked for the next 10 years of prediction, this represents 16.12% of the actual data.
+
+# Exploratory Data Analysis
+
+```{r}
+# countries histograms
+pwt_raw %>% 
+  mutate(isocode2 = case_when(
+    isocode == "CAN" ~ "Canada",
+    isocode == "MEX" ~ "Mexico",
+    TRUE ~ "United States of America"
+  )) %>% 
+  ggplot(aes(x = rtfpna, fill = isocode2)) +
+  geom_histogram(binwidth = .05, color = "white") +
+  scale_fill_manual(values = c("#1874CD", "#C28E42", "#00688B")) +
+  facet_wrap(~isocode2) +
+  theme_tq() +
+  guides(fill = FALSE) +
+  labs(
+    title = "RTFP^NA Histogram for the Countries",
+    x = "RTFP^NA",
+    y = "Frequency",
+    caption = "github.com/LucianoBatista"
+  ) +
+  theme(plot.title = element_markdown(),
+        axis.title.x = element_markdown())
+```
+
+The data is close to the normal distribution, but for being small data this is not too clear.
+
+```{r}
+# time series visualization
+pwt_raw %>% 
+  mutate(isocode2 = case_when(
+    isocode == "CAN" ~ "Canada",
+    isocode == "MEX" ~ "Mexico",
+    TRUE ~ "United States of America"
+  )) %>%
+  ggplot(aes(x = year,
+             y = rtfpna,
+             color = isocode2)) +
+  geom_line() +
+  scale_color_manual(values = c("#1874CD", "#C28E42", "#00688B")) +
+  facet_wrap(~isocode2) +
+  #expand_limits(y = 0) +
+  guides(color = FALSE) +
+  theme_tq() +
+  labs(
+    title = "Time Series for the Countries (1950-2011)",
+    x = "",
+    y = "RTFP^NA",
+    caption = "github.com/LucianoBatista"
+
+) +
+  theme(
+    axis.title.y = element_markdown()
+  )
+
+```
+
+About the series profile:
+
+- **Canada series:** these series have a stationary profile, constant oscillation across the years.
+
+- **USA series:** a clear positive trend doesn't have seasonal profile.
+
+- **Mexico series:** this series has been showing a negative trend for the last 20 years and also doesn't have a clear seasonality.
+
+# Creating a ts.obj object 
+
+To use the forecast package and others, it's necessary to have a time series object, and for that was made the conversion.
+
+```{r}
+# ts_USA
+pwt_usa_tbl <- pwt_raw %>% 
+  filter(isocode == "USA") %>% 
+  select(year, rtfpna)
+
+# ts_MEX
+pwt_mex_tbl <- pwt_raw %>% 
+  filter(isocode == "MEX") %>% 
+  select(year, rtfpna)
+
+# ts_CAN
+pwt_can_tbl <- pwt_raw %>% 
+  filter(isocode == "CAN") %>% 
+  select(year, rtfpna)
+
+# first and the last time series year
+start_point <- min(pwt_raw$year)
+end_point <- max(pwt_raw$year)
+
+# ts.obj
+ts_USA <- ts(data = pwt_usa_tbl$rtfpna, # the series values
+             start = start_point, # the time of the first observation
+             end = end_point,  # the time of the last observation
+             frequency = 1) # the series frequency
+
+ts_MEX <- ts(data = pwt_mex_tbl$rtfpna, # the series values
+            start = start_point, # the time of the first observation
+            end = end_point,  # the time of the last observation
+            frequency = 1) # the Series frequency
+
+ts_CAN <- ts(data = pwt_can_tbl$rtfpna, # the series values
+            start = start_point, # the time of the first observation
+            end = end_point,  # the time of the last observation
+            frequency = 1) # the series frequency
+
+# to view the time series with interactive
+ts_plot(ts_USA) # time series of interest
+
+```
+
+These will be the objects used for the forecasting.
+
+# Decomposition of Time Series Data
+
+As was shown before, the time series doesn't seem to have a visible seasonality. But, it's better check that with `stats::decompose()` function.
+
+To plot this, the function needs that the series has two or more periods, but all the series are yearly distributed. So, was applied one change in the frequency parameter, just for this visualization.
+
+```{r}
+ts_USA_frq2 <- ts(data = pwt_usa_tbl$rtfpna, 
+             start = start_point, 
+             end = end_point,  
+             frequency = 2) # changed
+
+ts_MEX_frq2 <- ts(data = pwt_mex_tbl$rtfpna, 
+            start = start_point, 
+            end = end_point,  
+            frequency = 2) # changed
+
+ts_CAN_frq2 <- ts(data = pwt_can_tbl$rtfpna, 
+            start = start_point,  
+            end = end_point,  
+            frequency = 2) # changed
+
+
+plot(decompose(ts_USA_frq2))
+plot(decompose(ts_MEX_frq2))
+plot(decompose(ts_CAN_frq2))
+
+```
+
+It's possible to see that all the seasonal components have very little variation in the y-axis. So, was assumed that all the series don't have a seasonal component.
+
+# Modeling
+
+In this step will be used the ARIMA models, these classic models are known for your robust behavior, and are applicable to the most diverse kinds of time series. 
+
+The hyperparameters of ARIMA models will be tuning in regard to the AIC metric. The AIC (Akaike Information Criterion) represent how well the series will fit. The less the value, the better.
+
+# TS USA
+
+```{r}
+# time series visualization
+ts_plot(ts_USA)
+
+# train and test
+ts_USA_split <- ts_split(ts_USA, sample.out = 10)
+train_usa <- ts_USA_split$train
+test_usa <- ts_USA_split$test
+
+# diagnostic with ACF and PACF
+# ACF e PACF to check for autocorrelation
+par(mfrow = c(1, 2))
+acf(train_usa)
+pacf(train_usa)
+```
+
+Each bar in the ACF plot represents the level of correlation between the series and its lags in chronological order. The blue dotted lines indicate whether the level of correlation between the series and each lag is significant or not.
+
+The PCF plot is similar, the unique difference is for considering also the periods before the actual lag. 
+
+The bars between the dotted lines meaning that we can reject the hypothesis that there's autocorrelation for that lag.
+
+For the USA, the ACF plot is showing that there is autocorrelation and PACF is showing that there's a high probability that the data is not correlated.
+
+```{r}
+# Seed for reproducibility
+set.seed(123)
+
+# hyperparametrs
+p <- q <- P <- Q <- 0:2
+
+arima_grid <- expand.grid(p, q, P, Q)
+names(arima_grid) <- c("p", "q", "P", "Q")
+arima_grid$d <- 1
+arima_grid$D <- 1
+
+arima_grid$k <- rowSums(arima_grid)
+
+# grid search table
+arima_grid <- arima_grid %>% filter(k <= 7)
+
+# iter over the grid search table
+arima_search <- lapply(1:nrow(arima_grid), function(i) {
+  md <- NULL
+  md <- arima(train_usa, order = c(arima_grid$p[i], 1, arima_grid$q[i]),
+              seasonal = list(order = c(arima_grid$P[i], 1, arima_grid$Q[i])),
+              method = "ML")
+  results <- data.frame(p = arima_grid$p[i], d = 1, q = arima_grid$q[i],
+                        p = arima_grid$P[i], D = 1, Q = arima_grid$Q[i],
+                        AIC = md$aic)
+}) %>% bind_rows() %>% arrange(AIC)
+
+
+head(arima_search)
+
+best_model_ts_USA <- arima(train_usa, order = c(0, 1, 1), seasonal = list(order = c(0, 1, 0)))
+
+best_model_test_fc <- forecast(best_model_ts_USA, h = 10)
+
+accuracy(best_model_test_fc, test_usa)
+
+test_forecast(ts_USA,
+              forecast.obj = best_model_test_fc,
+              test = test_usa)
+
+# final step
+final_md <- arima(ts_USA, order = c(0, 1, 1), seasonal = list(order = c(0, 1, 0)))
+
+ts_USA_forecast <- forecast(final_md, h = 10)
+
+plot_forecast(ts_USA_forecast)
+```
+
+
+# TS MEX
+
+```{r}
+# time series visualization
+ts_plot(ts_MEX)
+
+# train and test
+ts_MEX_split <- ts_split(ts_MEX, sample.out = 10)
+train_mex <- ts_MEX_split$train
+test_mex <- ts_MEX_split$test
+
+# diagnostic with ACF and PACF func
+# ACF e PACF to check for autocorrelations
+par(mfrow = c(1, 2))
+acf(train_mex)
+pacf(train_mex)
+
+```
+
+The behavior of the Mexico time series is similar to the USA, the difference is that across the years the series has been showing a negative correlation with the lags. 
+
+But, the PACF stay without apparent autocorrelation.
+
+```{r}
+# using the same grid search table as before
+# iterate over the grid search table
+arima_search <- lapply(1:nrow(arima_grid), function(i) {
+  md <- NULL
+  md <- arima(train_mex, order = c(arima_grid$p[i], 1, arima_grid$q[i]),
+              seasonal = list(order = c(arima_grid$P[i], 1, arima_grid$Q[i])),
+              method = "ML")
+  results <- data.frame(p = arima_grid$p[i], d = 1, q = arima_grid$q[i],
+                        p = arima_grid$P[i], D = 1, Q = arima_grid$Q[i],
+                        AIC = md$aic)
+}) %>% bind_rows() %>% arrange(AIC)
+
+head(arima_search)
+
+best_model_ts_MEX <- arima(train_mex, order = c(0, 1, 1), seasonal = list(order = c(0, 1, 0)))
+
+best_model_test_fc <- forecast(best_model_ts_MEX, h = 10)
+
+accuracy(best_model_test_fc, test_mex)
+
+test_forecast(ts_MEX,
+              forecast.obj = best_model_test_fc,
+              test = test_mex)
+
+# final step
+final_md <- arima(ts_MEX, order = c(0, 1, 1), seasonal = list(order = c(0, 1, 0)))
+
+ts_MEX_forecast <- forecast(final_md, h = 10)
+
+plot_forecast(ts_MEX_forecast)
+```
+
+# TS CAN
+
+```{r}
+# time series visualization
+ts_plot(ts_CAN) 
+
+# train and test
+ts_CAN_split <- ts_split(ts_CAN, sample.out = 10)
+train_can <- ts_CAN_split$train
+test_can <- ts_CAN_split$test
+
+# diagnostic with ACF and PACF func
+# ACF e PACF to check for auto-correlations
+par(mfrow = c(1, 2))
+acf(train_can)
+pacf(train_can)
+
+```
+
+The ACF plot to CANADA time series is dropping faster down the blue dotted line and seems to initiate with a negative autocorrelation. 
+
+In the PACF, all the meaningful information stays between the blue dotted lines.
+
+```{r}
+# using the same grid search table as before
+# iterate over the grid search table
+arima_search <- lapply(1:nrow(arima_grid), function(i) {
+  md <- NULL
+  md <- arima(train_can, order = c(arima_grid$p[i], 1, arima_grid$q[i]),
+              seasonal = list(order = c(arima_grid$P[i], 1, arima_grid$Q[i])),
+              method = "ML")
+  results <- data.frame(p = arima_grid$p[i], d = 1, q = arima_grid$q[i],
+                        p = arima_grid$P[i], D = 1, Q = arima_grid$Q[i],
+                        AIC = md$aic)
+}) %>% bind_rows() %>% arrange(AIC)
+
+head(arima_search)
+
+best_model_ts_CAN <- arima(train_can, order = c(0, 1, 1), seasonal = list(order = c(0, 1, 2)))
+
+best_model_test_fc <- forecast(best_model_ts_CAN, h = 10)
+
+accuracy(best_model_test_fc, test_can)
+
+test_forecast(ts_CAN,
+              forecast.obj = best_model_test_fc,
+              test = test_can)
+
+# final step
+final_md <- arima(ts_CAN, order = c(0, 1, 1), seasonal = list(order = c(0, 1, 2)))
+
+ts_CAN_forecast <- forecast(final_md, h = 10)
+
+plot_forecast(ts_CAN_forecast)
+```
+
+# Conclusions
+
+All the forecast values can be find in the objects: `ts_CAN_forecast`, `ts_MEX_forecast` and `ts_USA_forecast`. Sadly, the confidence interval was very wide as long as the year becomes too distant to the actual value. This can be fixed by collecting more data.
+
+Between the three predictions, the most precise was the forecast for the USA RTFP$^{NA}$, which had a tight confidence interval.
+
+
